@@ -71,7 +71,7 @@
     patrolMin: 480,
     patrolMax: 800,
     state: 'open',
-    stateTimer: SHIELD_OPEN,
+    stateTimer: 0,
   };
 
   const PUNCH_REACH = 38;             // px
