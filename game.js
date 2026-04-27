@@ -43,6 +43,10 @@
     uppercutTimer: 0,
     whiffLock: 0,
     knockbackVx: 0,
+    diving: false,
+    landingLag: 0,
+    diveHit: false,
+    walkPhase: 0,
     punchesLanded: 0,
     punchAttempts: 0,
   };
@@ -59,6 +63,7 @@
     state: 'idle',
     stateTimer: 0,
     jabHit: false,
+    feintRoll: false,
   };
 
   const PUNCH_REACH = 38;             // px
@@ -91,6 +96,16 @@
   const UPPER_DAMAGE = 10;
   const UPPER_HIT_TOL = 28;           // px
   const WHIFF_LOCK = 0.35;            // s
+  const DIVE_VX = 320;                // px/s
+  const DIVE_VY_BOOST = 540;          // px/s
+  const DIVE_DAMAGE = 9;
+  const DIVE_HIT_TOL = 28;            // px
+  const DIVE_REACH = 30;              // px
+  const DIVE_FIST_DY = -30;           // px from player.y
+  const LANDING_LAG = 0.4;            // s
+  const FEINT_CHANCE = 0.30;
+  const FEINT_TRIGGER_RATIO = 0.6;
+  const FEINT_DURATION = 0.4;         // s
 
   function resetMatch() {
     player.x = 250; player.y = GROUND_Y;
@@ -105,6 +120,10 @@
     player.uppercutTimer = 0;
     player.whiffLock = 0;
     player.knockbackVx = 0;
+    player.diving = false;
+    player.landingLag = 0;
+    player.diveHit = false;
+    player.walkPhase = 0;
     player.punchesLanded = 0; player.punchAttempts = 0;
     hitstop = 0;
     opponent.hp = opponent.maxHp;
@@ -115,6 +134,7 @@
     opponent.state = 'idle';
     opponent.stateTimer = 0;
     opponent.jabHit = false;
+    opponent.feintRoll = false;
   }
 
   function show(el) { el.classList.remove('hidden'); }
@@ -158,10 +178,12 @@
     let move = 0;
     if (keys.has('a') || keys.has('arrowleft')) move -= 1;
     if (keys.has('d') || keys.has('arrowright')) move += 1;
-    if (player.whiffLock > 0) move = 0;
-    const targetVx = move * WALK_SPEED;
-    player.vx += (targetVx - player.vx) * (1 - Math.pow(1 - VX_LERP, dt * 60));
-    if (Math.abs(player.vx) < 3) player.vx = 0;
+    if (player.whiffLock > 0 || player.landingLag > 0 || player.diving) move = 0;
+    if (!player.diving) {
+      const targetVx = move * WALK_SPEED;
+      player.vx += (targetVx - player.vx) * (1 - Math.pow(1 - VX_LERP, dt * 60));
+      if (Math.abs(player.vx) < 3) player.vx = 0;
+    }
     player.x += player.vx * dt;
     if (Math.abs(player.knockbackVx) > 6) {
       player.x += player.knockbackVx * dt;
@@ -179,7 +201,7 @@
     if (player.crouching) player.vx = 0;
 
     const wantJump = keysPressed.has('w') || keysPressed.has('arrowup');
-    if (wantJump && player.onGround && !player.crouching && player.whiffLock <= 0) {
+    if (wantJump && player.onGround && !player.crouching && player.whiffLock <= 0 && player.landingLag <= 0) {
       player.vy = JUMP_VELOCITY;
       player.onGround = false;
     }
@@ -190,24 +212,125 @@
         player.y = GROUND_Y;
         player.vy = 0;
         player.onGround = true;
+        if (player.diving) {
+          player.diving = false;
+          player.vx = 0;
+          if (!player.diveHit) player.landingLag = LANDING_LAG;
+          player.diveHit = false;
+        }
       }
     }
+
+    player.walkPhase += Math.abs(player.vx) * dt;
 
     if (player.punchCooldown > 0) player.punchCooldown -= dt;
     if (player.punchTimer > 0) player.punchTimer -= dt;
     if (player.punchBuffer > 0) player.punchBuffer -= dt;
     if (player.uppercutTimer > 0) player.uppercutTimer -= dt;
     if (player.whiffLock > 0) player.whiffLock -= dt;
+    if (player.landingLag > 0) player.landingLag -= dt;
+
+    // Divepunch: descending air J press, bypasses buffer
+    if ((keysPressed.has('j') || keysPressed.has(' '))
+        && !player.onGround && player.vy >= 0
+        && !player.diving && player.whiffLock <= 0) {
+      player.diving = true;
+      player.diveHit = false;
+      player.vy = DIVE_VY_BOOST;
+      player.vx = DIVE_VX * player.facing;
+      player.punchAttempts++;
+      keysPressed.delete('j');
+      keysPressed.delete(' ');
+    }
 
     const wantPunch = keysPressed.has('j') || keysPressed.has(' ');
-    if (wantPunch && player.whiffLock <= 0) player.punchBuffer = PUNCH_BUFFER;
+    if (wantPunch && player.whiffLock <= 0 && !player.diving && player.landingLag <= 0) {
+      player.punchBuffer = PUNCH_BUFFER;
+    }
 
-    if (player.punchBuffer > 0 && player.punchCooldown <= 0 && player.whiffLock <= 0) {
+    // Opponent state machine + knockback. Runs BEFORE player ground attacks
+    // so the active hit-check resolves before a player punch can mutate state.
+    if (opponent.hitFlash > 0) opponent.hitFlash -= dt;
+
+    const knockbackActive = Math.abs(opponent.knockback) > 6;
+    if (knockbackActive) {
+      opponent.x += opponent.knockback * dt;
+      opponent.knockback *= Math.pow(0.7, dt * 60);
+    } else {
+      opponent.knockback = 0;
+    }
+
+    if (opponent.stateTimer > 0) opponent.stateTimer = Math.max(0, opponent.stateTimer - dt);
+
+    if (opponent.state === 'idle') {
+      if (!knockbackActive) {
+        opponent.x += opponent.patrolDir * OPPONENT_SPEED * dt;
+        if (opponent.x <= opponent.patrolMin) {
+          opponent.x = opponent.patrolMin;
+          opponent.patrolDir = 1;
+        } else if (opponent.x >= opponent.patrolMax) {
+          opponent.x = opponent.patrolMax;
+          opponent.patrolDir = -1;
+        }
+      }
+      const dxToPlayer = Math.abs(player.x - opponent.x);
+      if (dxToPlayer < JAB_RANGE && dxToPlayer > CONTACT_RANGE
+          && opponent.stateTimer <= 0 && opponent.hp > 0 && player.hp > 0) {
+        opponent.state = 'windup';
+        opponent.stateTimer = JAB_WINDUP;
+        opponent.jabHit = false;
+        opponent.feintRoll = Math.random() < FEINT_CHANCE;
+      }
+    } else if (opponent.state === 'windup') {
+      const elapsed = JAB_WINDUP - opponent.stateTimer;
+      if (opponent.feintRoll && elapsed >= JAB_WINDUP * FEINT_TRIGGER_RATIO) {
+        opponent.state = 'feint';
+        opponent.stateTimer = FEINT_DURATION;
+        opponent.feintRoll = false;
+      } else if (opponent.stateTimer <= 0) {
+        opponent.state = 'active';
+        opponent.stateTimer = JAB_ACTIVE;
+      }
+    } else if (opponent.state === 'active') {
+      if (!opponent.jabHit) {
+        const oppFacing = player.x < opponent.x ? -1 : 1;
+        const oppFistX = opponent.x + oppFacing * JAB_REACH;
+        const oppFistY = opponent.y - 50;
+        const drop = player.crouching ? CROUCH_HURTBOX_DROP : 0;
+        const bandHi = player.y - 65 + drop;
+        const bandLo = player.y - 5 + drop;
+        if (Math.abs(oppFistX - player.x) < JAB_HIT_TOL && oppFistY > bandHi && oppFistY < bandLo) {
+          player.hp = Math.max(0, player.hp - JAB_DAMAGE);
+          player.hitFlash = HIT_FLASH_DURATION;
+          player.knockbackVx = 360 * oppFacing;
+          hitstop = player.hp <= 0 ? HITSTOP_DURATION * 2 : HITSTOP_DURATION;
+          opponent.jabHit = true;
+        }
+      }
+      if (opponent.stateTimer <= 0) {
+        opponent.state = 'recovery';
+        opponent.stateTimer = JAB_RECOVERY;
+      }
+    } else if (opponent.state === 'recovery') {
+      if (opponent.stateTimer <= 0) {
+        opponent.state = 'idle';
+        opponent.stateTimer = JAB_COOLDOWN;
+      }
+    } else if (opponent.state === 'feint') {
+      if (opponent.stateTimer <= 0) {
+        opponent.state = 'idle';
+        opponent.stateTimer = JAB_COOLDOWN;
+      }
+    }
+    opponent.x = Math.max(ARENA_LEFT + 16, Math.min(ARENA_RIGHT - 16, opponent.x));
+
+    // Player ground attack resolution (after opponent active hit-check).
+    if (player.punchBuffer > 0 && player.punchCooldown <= 0
+        && player.whiffLock <= 0 && !player.diving && player.landingLag <= 0) {
       player.punchBuffer = 0;
       player.punchAttempts++;
 
       if (player.crouching) {
-        // Crouch-uppercut: shorter reach, longer cooldown, higher arc, no whiffLock
         player.uppercutTimer = UPPER_DURATION;
         player.punchCooldown = UPPER_COOLDOWN;
         const fistX = player.x + player.facing * UPPER_REACH;
@@ -227,7 +350,6 @@
           player.uppercutTimer = UPPER_DURATION * 0.4;
         }
       } else {
-        // Standing punch
         player.punchTimer = PUNCH_DURATION;
         player.punchCooldown = PUNCH_COOLDOWN;
         const fistX = player.x + player.facing * PUNCH_REACH;
@@ -253,64 +375,27 @@
       }
     }
 
-    if (opponent.hitFlash > 0) opponent.hitFlash -= dt;
-
-    const knockbackActive = Math.abs(opponent.knockback) > 6;
-    if (knockbackActive) {
-      opponent.x += opponent.knockback * dt;
-      opponent.knockback *= Math.pow(0.7, dt * 60);
-    } else {
-      if (opponent.stateTimer > 0) opponent.stateTimer = Math.max(0, opponent.stateTimer - dt);
-
-      if (opponent.state === 'idle') {
-        opponent.x += opponent.patrolDir * OPPONENT_SPEED * dt;
-        if (opponent.x <= opponent.patrolMin) {
-          opponent.x = opponent.patrolMin;
-          opponent.patrolDir = 1;
-        } else if (opponent.x >= opponent.patrolMax) {
-          opponent.x = opponent.patrolMax;
-          opponent.patrolDir = -1;
-        }
-        const dxToPlayer = Math.abs(player.x - opponent.x);
-        if (dxToPlayer < JAB_RANGE && dxToPlayer > CONTACT_RANGE
-            && opponent.stateTimer <= 0 && opponent.hp > 0 && player.hp > 0) {
-          opponent.state = 'windup';
-          opponent.stateTimer = JAB_WINDUP;
-          opponent.jabHit = false;
-        }
-      } else if (opponent.state === 'windup') {
-        if (opponent.stateTimer <= 0) {
-          opponent.state = 'active';
-          opponent.stateTimer = JAB_ACTIVE;
-        }
-      } else if (opponent.state === 'active') {
-        if (!opponent.jabHit) {
-          const oppFacing = player.x < opponent.x ? -1 : 1;
-          const oppFistX = opponent.x + oppFacing * JAB_REACH;
-          const oppFistY = opponent.y - 50;
-          const drop = player.crouching ? CROUCH_HURTBOX_DROP : 0;
-          const bandHi = player.y - 65 + drop;
-          const bandLo = player.y - 5 + drop;
-          if (Math.abs(oppFistX - player.x) < JAB_HIT_TOL && oppFistY > bandHi && oppFistY < bandLo) {
-            player.hp = Math.max(0, player.hp - JAB_DAMAGE);
-            player.hitFlash = HIT_FLASH_DURATION;
-            player.knockbackVx = 360 * oppFacing;
-            hitstop = player.hp <= 0 ? HITSTOP_DURATION * 2 : HITSTOP_DURATION;
-            opponent.jabHit = true;
-          }
-        }
-        if (opponent.stateTimer <= 0) {
-          opponent.state = 'recovery';
-          opponent.stateTimer = JAB_RECOVERY;
-        }
-      } else if (opponent.state === 'recovery') {
-        if (opponent.stateTimer <= 0) {
-          opponent.state = 'idle';
-          opponent.stateTimer = JAB_COOLDOWN;
-        }
+    // Divepunch hit-check — runs every frame while diving.
+    if (player.diving && !player.diveHit && opponent.hp > 0) {
+      const fistX = player.x + player.facing * DIVE_REACH;
+      const fistY = player.y + DIVE_FIST_DY;
+      if (Math.abs(fistX - opponent.x) < DIVE_HIT_TOL
+          && fistY > opponent.y - 80 && fistY < opponent.y - 20) {
+        const counter = opponent.state === 'recovery' || opponent.state === 'windup';
+        const dmg = counter ? Math.round(DIVE_DAMAGE * 1.3) : DIVE_DAMAGE;
+        opponent.hp = Math.max(0, opponent.hp - dmg);
+        opponent.hitFlash = HIT_FLASH_DURATION;
+        opponent.knockback = 420 * player.facing;
+        opponent.state = 'idle';
+        opponent.stateTimer = JAB_COOLDOWN * (counter ? 1.0 : 0.5);
+        opponent.jabHit = false;
+        player.punchesLanded++;
+        player.diveHit = true;
+        hitstop = opponent.hp <= 0
+          ? HITSTOP_DURATION * 2
+          : (counter ? HITSTOP_DURATION * 1.5 : HITSTOP_DURATION);
       }
     }
-    opponent.x = Math.max(ARENA_LEFT + 16, Math.min(ARENA_RIGHT - 16, opponent.x));
 
     if (player.contactCooldown > 0) player.contactCooldown -= dt;
     if (player.hitFlash > 0) player.hitFlash -= dt;
@@ -377,11 +462,25 @@
     const {
       facing = 1, punchT = -1, color = '#eee', airborne = false, crouch = false,
       windup = false, windupFacing = 1,
+      diving = false, landingLag = 0, walkPhase = 0,
     } = opts;
     ctx.fillStyle = color;
     ctx.font = 'bold 20px ui-monospace, monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
+
+    if (diving) {
+      ctx.fillText(facing === 1 ? '\\O' : 'O/', x, y - 30);
+      ctx.fillText(facing === 1 ? '>>' : '<<', x + facing * 14, y - 14);
+      ctx.fillText('/ \\', x, y + 4);
+      return;
+    }
+    if (landingLag > 0) {
+      ctx.fillText('_O_', x, y - 30);
+      ctx.fillText('\\|/', x, y - 12);
+      ctx.fillText('/ \\', x, y + 4);
+      return;
+    }
 
     if (crouch) {
       ctx.fillText('_O_', x, y - 30);
@@ -418,7 +517,8 @@
       ctx.fillText(windup ? (windupFacing === 1 ? '<|\\' : '/|>') : '/|\\', x, y - 30);
     }
 
-    ctx.fillText('/ \\', x, y - 10);
+    const stride = (walkPhase % 64) < 32 ? '/ \\' : '\\ /';
+    ctx.fillText(airborne ? '/ \\' : stride, x, y - 10);
     if (airborne) ctx.fillText('~ ~', x, y + 6);
   }
 
@@ -474,6 +574,9 @@
         color: flashColor(PLAYER_RGB, FLASH_RGB, player.hitFlash / HIT_FLASH_DURATION),
         airborne: !player.onGround,
         crouch: player.crouching,
+        diving: player.diving,
+        landingLag: player.landingLag,
+        walkPhase: player.walkPhase,
       });
 
       if (player.uppercutTimer > 0) {
@@ -490,7 +593,7 @@
       drawStick(opponent.x, opponent.y, {
         facing: -1,
         color: flashColor(OPPONENT_RGB, FLASH_RGB, opponent.hitFlash / HIT_FLASH_DURATION),
-        windup: opponent.state === 'windup',
+        windup: opponent.state === 'windup' || opponent.state === 'feint',
         windupFacing: oppFacing,
       });
 
@@ -512,11 +615,20 @@
         ctx.fillText('====', opponent.x + oppFacing * (8 + reach), opponent.y - 50);
       }
       if (opponent.state === 'recovery') {
-        ctx.fillStyle = '#888';
+        const pulse = 0.65 + 0.35 * Math.sin(performance.now() / 90);
+        ctx.fillStyle = `rgba(200, 200, 200, ${pulse.toFixed(3)})`;
         ctx.font = 'bold 16px ui-monospace, monospace';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText('~', opponent.x, opponent.y - 78);
+      }
+      if (opponent.state === 'feint') {
+        const flicker = Math.floor(performance.now() / 100) % 2 === 0;
+        ctx.fillStyle = '#776';
+        ctx.font = 'bold 16px ui-monospace, monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(flicker ? '!' : '?', opponent.x, opponent.y - 78);
       }
 
       drawHpBar('YOU', player.hp, player.maxHp, 'left',
