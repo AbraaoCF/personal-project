@@ -70,10 +70,8 @@
     patrolDir: -1,
     patrolMin: 480,
     patrolMax: 800,
-    state: 'idle',
-    stateTimer: 0,
-    jabHit: false,
-    feintRoll: false,
+    state: 'open',
+    stateTimer: SHIELD_OPEN,
   };
 
   const PUNCH_REACH = 38;             // px
@@ -91,15 +89,6 @@
   const PUNCH_BUFFER = 0.1;           // s
   const HITSTOP_DURATION = 0.0667;    // s
   const HIT_FLASH_DURATION = 0.1333;  // s
-  const JAB_RANGE = 60;               // px
-  const JAB_WINDUP = 0.5;             // s
-  const JAB_ACTIVE = 0.12;            // s
-  const JAB_RECOVERY = 0.35;          // s
-  const JAB_COOLDOWN = 1.2;           // s
-  const JAB_DAMAGE = 12;
-  const JAB_REACH = 32;               // px
-  const JAB_HIT_TOL = 28;             // px
-  const CROUCH_HURTBOX_DROP = 16;     // px
   const UPPER_REACH = 30;             // px
   const UPPER_DURATION = 0.2;         // s
   const UPPER_COOLDOWN = 0.5;         // s
@@ -113,9 +102,12 @@
   const DIVE_REACH = 30;              // px
   const DIVE_FIST_DY = -30;           // px from player.y
   const LANDING_LAG = 0.4;            // s
-  const FEINT_CHANCE = 0.30;
-  const FEINT_TRIGGER_RATIO = 0.6;
-  const FEINT_DURATION = 0.4;         // s
+  // Sparring-mode opponent: shield rhythm + evasion (no attacks).
+  const SHIELD_OPEN = 0.6;            // s — vulnerable window
+  const SHIELD_CLOSED = 1.4;          // s — protected window
+  const SHIELD_BOUNCE = 360;          // px/s — knockback when player hits the shield
+  const EVASION_RANGE = 90;           // px — opponent flees when player closer than this
+  const EVASION_SPEED = 130;          // px/s — opponent's flee speed
 
   function resetRound() {
     player.x = 250; player.y = GROUND_Y;
@@ -142,10 +134,8 @@
     opponent.x = 640;
     opponent.hitFlash = 0; opponent.knockback = 0;
     opponent.patrolDir = -1;
-    opponent.state = 'idle';
-    opponent.stateTimer = 0;
-    opponent.jabHit = false;
-    opponent.feintRoll = false;
+    opponent.state = 'open';
+    opponent.stateTimer = SHIELD_OPEN;
   }
 
   function resetMatch() {
@@ -283,8 +273,7 @@
       player.punchBuffer = PUNCH_BUFFER;
     }
 
-    // Opponent state machine + knockback. Runs BEFORE player ground attacks
-    // so the active hit-check resolves before a player punch can mutate state.
+    // Opponent: shield rhythm + cat/mouse evasion. Sparring sim — opponent does not attack.
     if (opponent.hitFlash > 0) opponent.hitFlash -= dt;
 
     const knockbackActive = Math.abs(opponent.knockback) > 6;
@@ -296,9 +285,24 @@
     }
 
     if (opponent.stateTimer > 0) opponent.stateTimer = Math.max(0, opponent.stateTimer - dt);
+    if (opponent.state === 'open' && opponent.stateTimer <= 0) {
+      opponent.state = 'shielding';
+      opponent.stateTimer = SHIELD_CLOSED;
+    } else if (opponent.state === 'shielding' && opponent.stateTimer <= 0) {
+      opponent.state = 'open';
+      opponent.stateTimer = SHIELD_OPEN;
+    }
 
-    if (opponent.state === 'idle') {
-      if (!knockbackActive) {
+    if (!knockbackActive && opponent.hp > 0 && player.hp > 0) {
+      const dxToPlayer = player.x - opponent.x;
+      const dist = Math.abs(dxToPlayer);
+      if (dist < EVASION_RANGE) {
+        // Cat/mouse: flee from the player.
+        const fleeDir = dxToPlayer > 0 ? -1 : 1;
+        opponent.x += fleeDir * EVASION_SPEED * dt;
+        opponent.patrolDir = fleeDir;
+      } else {
+        // Default patrol — wander between bounds.
         opponent.x += opponent.patrolDir * OPPONENT_SPEED * dt;
         if (opponent.x <= opponent.patrolMin) {
           opponent.x = opponent.patrolMin;
@@ -307,54 +311,6 @@
           opponent.x = opponent.patrolMax;
           opponent.patrolDir = -1;
         }
-      }
-      const dxToPlayer = Math.abs(player.x - opponent.x);
-      if (dxToPlayer < JAB_RANGE && dxToPlayer > CONTACT_RANGE
-          && opponent.stateTimer <= 0 && opponent.hp > 0 && player.hp > 0) {
-        opponent.state = 'windup';
-        opponent.stateTimer = JAB_WINDUP;
-        opponent.jabHit = false;
-        opponent.feintRoll = Math.random() < FEINT_CHANCE;
-      }
-    } else if (opponent.state === 'windup') {
-      const elapsed = JAB_WINDUP - opponent.stateTimer;
-      if (opponent.feintRoll && elapsed >= JAB_WINDUP * FEINT_TRIGGER_RATIO) {
-        opponent.state = 'feint';
-        opponent.stateTimer = FEINT_DURATION;
-        opponent.feintRoll = false;
-      } else if (opponent.stateTimer <= 0) {
-        opponent.state = 'active';
-        opponent.stateTimer = JAB_ACTIVE;
-      }
-    } else if (opponent.state === 'active') {
-      if (!opponent.jabHit) {
-        const oppFacing = player.x < opponent.x ? -1 : 1;
-        const oppFistX = opponent.x + oppFacing * JAB_REACH;
-        const oppFistY = opponent.y - 50;
-        const drop = player.crouching ? CROUCH_HURTBOX_DROP : 0;
-        const bandHi = player.y - 65 + drop;
-        const bandLo = player.y - 5 + drop;
-        if (Math.abs(oppFistX - player.x) < JAB_HIT_TOL && oppFistY > bandHi && oppFistY < bandLo) {
-          player.hp = Math.max(0, player.hp - JAB_DAMAGE);
-          player.hitFlash = HIT_FLASH_DURATION;
-          player.knockbackVx = 360 * oppFacing;
-          hitstop = player.hp <= 0 ? HITSTOP_DURATION * 2 : HITSTOP_DURATION;
-          opponent.jabHit = true;
-        }
-      }
-      if (opponent.stateTimer <= 0) {
-        opponent.state = 'recovery';
-        opponent.stateTimer = JAB_RECOVERY;
-      }
-    } else if (opponent.state === 'recovery') {
-      if (opponent.stateTimer <= 0) {
-        opponent.state = 'idle';
-        opponent.stateTimer = JAB_COOLDOWN;
-      }
-    } else if (opponent.state === 'feint') {
-      if (opponent.stateTimer <= 0) {
-        opponent.state = 'idle';
-        opponent.stateTimer = JAB_COOLDOWN;
       }
     }
     opponent.x = Math.max(ARENA_LEFT + 16, Math.min(ARENA_RIGHT - 16, opponent.x));
@@ -370,19 +326,20 @@
         player.punchCooldown = UPPER_COOLDOWN;
         const fistX = player.x + player.facing * UPPER_REACH;
         if (Math.abs(fistX - opponent.x) < UPPER_HIT_TOL && opponent.hp > 0) {
-          const counter = opponent.state === 'recovery';
-          const dmg = counter ? Math.round(UPPER_DAMAGE * 1.5) : UPPER_DAMAGE;
-          opponent.hp = Math.max(0, opponent.hp - dmg);
-          opponent.hitFlash = HIT_FLASH_DURATION;
-          opponent.knockback = (counter ? 540 : 480) * player.facing;
-          opponent.state = 'idle';
-          opponent.stateTimer = JAB_COOLDOWN * (counter ? 1.0 : 0.5);
-          opponent.jabHit = false;
-          player.punchesLanded++;
-          hitstop = opponent.hp <= 0
-            ? HITSTOP_DURATION * 2
-            : (counter ? HITSTOP_DURATION * 1.5 : HITSTOP_DURATION);
-          player.uppercutTimer = UPPER_DURATION * 0.4;
+          if (opponent.state === 'shielding') {
+            opponent.hitFlash = HIT_FLASH_DURATION;
+            player.knockbackVx = -SHIELD_BOUNCE * player.facing;
+            hitstop = HITSTOP_DURATION * 0.5;
+          } else {
+            opponent.hp = Math.max(0, opponent.hp - UPPER_DAMAGE);
+            opponent.hitFlash = HIT_FLASH_DURATION;
+            opponent.knockback = 480 * player.facing;
+            opponent.state = 'shielding';
+            opponent.stateTimer = SHIELD_CLOSED;
+            player.punchesLanded++;
+            hitstop = opponent.hp <= 0 ? HITSTOP_DURATION * 2 : HITSTOP_DURATION;
+            player.uppercutTimer = UPPER_DURATION * 0.4;
+          }
         }
       } else {
         player.punchTimer = PUNCH_DURATION;
@@ -391,19 +348,20 @@
         const fistY = player.y - 50;
         let hit = false;
         if (Math.abs(fistX - opponent.x) < 28 && fistY > opponent.y - 65 && fistY < opponent.y - 5 && opponent.hp > 0) {
-          const counter = opponent.state === 'recovery';
-          const dmg = counter ? Math.round(PUNCH_DAMAGE * 1.5) : PUNCH_DAMAGE;
-          opponent.hp = Math.max(0, opponent.hp - dmg);
-          opponent.hitFlash = HIT_FLASH_DURATION;
-          opponent.knockback = (counter ? 540 : 360) * player.facing;
-          opponent.state = 'idle';
-          opponent.stateTimer = JAB_COOLDOWN * (counter ? 1.0 : 0.5);
-          opponent.jabHit = false;
-          player.punchesLanded++;
-          hitstop = opponent.hp <= 0
-            ? HITSTOP_DURATION * 2
-            : (counter ? HITSTOP_DURATION * 1.5 : HITSTOP_DURATION);
-          player.punchTimer = PUNCH_DURATION * 0.4;
+          if (opponent.state === 'shielding') {
+            opponent.hitFlash = HIT_FLASH_DURATION;
+            player.knockbackVx = -SHIELD_BOUNCE * player.facing;
+            hitstop = HITSTOP_DURATION * 0.5;
+          } else {
+            opponent.hp = Math.max(0, opponent.hp - PUNCH_DAMAGE);
+            opponent.hitFlash = HIT_FLASH_DURATION;
+            opponent.knockback = 360 * player.facing;
+            opponent.state = 'shielding';
+            opponent.stateTimer = SHIELD_CLOSED;
+            player.punchesLanded++;
+            hitstop = opponent.hp <= 0 ? HITSTOP_DURATION * 2 : HITSTOP_DURATION;
+            player.punchTimer = PUNCH_DURATION * 0.4;
+          }
           hit = true;
         }
         if (!hit) player.whiffLock = WHIFF_LOCK;
@@ -416,19 +374,22 @@
       const fistY = player.y + DIVE_FIST_DY;
       if (Math.abs(fistX - opponent.x) < DIVE_HIT_TOL
           && fistY > opponent.y - 80 && fistY < opponent.y - 20) {
-        const counter = opponent.state === 'recovery' || opponent.state === 'windup';
-        const dmg = counter ? Math.round(DIVE_DAMAGE * 1.3) : DIVE_DAMAGE;
-        opponent.hp = Math.max(0, opponent.hp - dmg);
-        opponent.hitFlash = HIT_FLASH_DURATION;
-        opponent.knockback = 420 * player.facing;
-        opponent.state = 'idle';
-        opponent.stateTimer = JAB_COOLDOWN * (counter ? 1.0 : 0.5);
-        opponent.jabHit = false;
-        player.punchesLanded++;
-        player.diveHit = true;
-        hitstop = opponent.hp <= 0
-          ? HITSTOP_DURATION * 2
-          : (counter ? HITSTOP_DURATION * 1.5 : HITSTOP_DURATION);
+        if (opponent.state === 'shielding') {
+          opponent.hitFlash = HIT_FLASH_DURATION;
+          player.knockbackVx = -SHIELD_BOUNCE * player.facing;
+          player.vy = -300; // bounce off the shield mid-air
+          hitstop = HITSTOP_DURATION * 0.5;
+          player.diveHit = true;
+        } else {
+          opponent.hp = Math.max(0, opponent.hp - DIVE_DAMAGE);
+          opponent.hitFlash = HIT_FLASH_DURATION;
+          opponent.knockback = 420 * player.facing;
+          opponent.state = 'shielding';
+          opponent.stateTimer = SHIELD_CLOSED;
+          player.punchesLanded++;
+          player.diveHit = true;
+          hitstop = opponent.hp <= 0 ? HITSTOP_DURATION * 2 : HITSTOP_DURATION;
+        }
       }
     }
 
@@ -510,7 +471,6 @@
   function drawStick(x, y, opts = {}) {
     const {
       facing = 1, punchT = -1, color = '#eee', airborne = false, crouch = false,
-      windup = false, windupFacing = 1,
       diving = false, landingLag = 0, walkPhase = 0, whiffLock = 0,
     } = opts;
     ctx.fillStyle = color;
@@ -565,10 +525,10 @@
         ctx.textAlign = 'center';
         ctx.fillText(facing === 1 ? '|\\' : '/|', x + whiffLean, y - 30);
       } else {
-        ctx.fillText(windup ? (windupFacing === 1 ? '<|\\' : '/|>') : '/|\\', x + whiffLean, y - 30);
+        ctx.fillText('/|\\', x + whiffLean, y - 30);
       }
     } else {
-      ctx.fillText(windup ? (windupFacing === 1 ? '<|\\' : '/|>') : '/|\\', x + whiffLean, y - 30);
+      ctx.fillText('/|\\', x + whiffLean, y - 30);
     }
 
     const stride = (walkPhase % 64) < 32 ? '/ \\' : '\\ /';
@@ -651,46 +611,17 @@
         ctx.fillText('*', player.x + player.facing * 18, arcY);
       }
 
-      const oppFacing = player.x < opponent.x ? -1 : 1;
       drawStick(opponent.x, opponent.y, {
         facing: -1,
         color: flashColor(OPPONENT_RGB, FLASH_RGB, opponent.hitFlash / HIT_FLASH_DURATION),
-        windup: opponent.state === 'windup' || opponent.state === 'feint',
-        windupFacing: oppFacing,
       });
 
-      if (opponent.state === 'windup') {
-        ctx.fillStyle = '#ffcc66';
-        ctx.font = 'bold 16px ui-monospace, monospace';
+      if (opponent.state === 'shielding') {
+        ctx.fillStyle = '#88ccee';
+        ctx.font = 'bold 18px ui-monospace, monospace';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText('!', opponent.x, opponent.y - 78);
-      }
-      if (opponent.state === 'active') {
-        const oppFacing = player.x < opponent.x ? -1 : 1;
-        const tIn = Math.min(1, (JAB_ACTIVE - opponent.stateTimer) / 0.04);
-        const reach = JAB_REACH * (1 - Math.pow(1 - tIn, 3));
-        ctx.fillStyle = flashColor(OPPONENT_RGB, FLASH_RGB, opponent.hitFlash / HIT_FLASH_DURATION);
-        ctx.font = 'bold 20px ui-monospace, monospace';
-        ctx.textAlign = oppFacing === 1 ? 'left' : 'right';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('====', opponent.x + oppFacing * (8 + reach), opponent.y - 50);
-      }
-      if (opponent.state === 'recovery') {
-        const pulse = 0.65 + 0.35 * Math.sin(performance.now() / 90);
-        ctx.fillStyle = `rgba(200, 200, 200, ${pulse.toFixed(3)})`;
-        ctx.font = 'bold 16px ui-monospace, monospace';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('~', opponent.x, opponent.y - 78);
-      }
-      if (opponent.state === 'feint') {
-        const flicker = Math.floor(performance.now() / 100) % 2 === 0;
-        ctx.fillStyle = '#776';
-        ctx.font = 'bold 16px ui-monospace, monospace';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(flicker ? '!' : '?', opponent.x, opponent.y - 78);
+        ctx.fillText('(+)', opponent.x, opponent.y - 78);
       }
 
       drawHpBar('YOU', player.hp, player.maxHp, 'left',
