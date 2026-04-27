@@ -21,6 +21,22 @@
   let gravityDir = 1;
   let flipTimer = 0;  // initialised in resetRound; FLIP_COOLDOWN is below
 
+  // Dynamic background state.
+  const PALETTE_RIGHT_UP = [20, 22, 28];   // cool dark — gravity normal
+  const PALETTE_FLIPPED  = [28, 22, 20];   // warm dark — gravity flipped
+  let bgR = 20, bgG = 22, bgB = 28;
+  const MOTES = [];
+  for (let i = 0; i < 24; i++) {
+    MOTES.push({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      vx: (Math.random() * 12 - 6) + (Math.random() < 0.5 ? -3 : 3),
+      vy: Math.random() * 10 - 5,
+      alpha: 0.05 + Math.random() * 0.10,
+    });
+  }
+  const pulseRing = { x: 0, y: 0, t: 1, dur: 0.6 };  // t >= dur means inactive
+
   const ROUNDS_TO_WIN = 2;
   const INTERMISSION_DURATION = 1.5;
   let playerWins = 0;
@@ -151,6 +167,8 @@
     flipTimer = FLIP_COOLDOWN;
     player.renderAngle = 0;
     opponent.renderAngle = 0;
+    bgR = PALETTE_RIGHT_UP[0]; bgG = PALETTE_RIGHT_UP[1]; bgB = PALETTE_RIGHT_UP[2];
+    pulseRing.t = pulseRing.dur + 1;
     opponent.hp = opponent.maxHp;
     opponent.displayedHp = opponent.maxHp; opponent.damageTailHp = opponent.maxHp;
     opponent.x = 640; opponent.y = GROUND_Y; opponent.vy = 0;
@@ -399,6 +417,9 @@
     } else if (opponent.state === 'shielding' && opponent.stateTimer <= 0) {
       opponent.state = 'open';
       opponent.stateTimer = SHIELD_OPEN;
+      pulseRing.x = opponent.x;
+      pulseRing.y = opponent.y;
+      pulseRing.t = 0;
     }
 
     if (!knockbackActive && opponent.hp > 0 && player.hp > 0) {
@@ -433,25 +454,29 @@
           }
         }
       } else {
-        // Wall-stuck: climb to mid-height (offset from current floor), then hold.
-        // When gravity normal (gravityDir=1) climb up to H*0.6 (300px from top).
-        // When flipped (gravityDir=-1) climb down to H*0.4 from current ceiling.
-        const targetY = gravityDir === 1 ? H * 0.6 : H * 0.4;
-        const climbDir = gravityDir === 1 ? -1 : 1;  // sign of vy needed
-        const reached = climbDir === -1 ? opponent.y <= targetY : opponent.y >= targetY;
-        if (!reached) {
-          opponent.y += (opponent.vy || climbDir * EVASION_SPEED) * dt;
-        } else {
-          opponent.y = targetY;
-          opponent.vy = 0;
-        }
-        // If player isn't pressuring this wall and is far, drop back to active floor.
+        // Wall-stuck. If player walks away, ease back to active floor; else climb.
         const playerNearWall = (opponent.surface === 'left' && player.x < 200)
                             || (opponent.surface === 'right' && player.x > W - 200);
-        if (!playerNearWall && Math.abs(player.x - opponent.x) > EVASION_RANGE * 2) {
-          opponent.surface = gravityDir === 1 ? 'floor' : 'ceiling';
-          opponent.y = gravityDir === 1 ? GROUND_Y : CEIL_Y;
-          opponent.vy = 0;
+        const dropBack = !playerNearWall && Math.abs(player.x - opponent.x) > EVASION_RANGE * 2;
+        if (dropBack) {
+          const dropTargetY = gravityDir === 1 ? GROUND_Y : CEIL_Y;
+          opponent.y += (dropTargetY - opponent.y) * (1 - Math.pow(1 - 0.18, dt * 60));
+          if (Math.abs(opponent.y - dropTargetY) < 2) {
+            opponent.y = dropTargetY;
+            opponent.surface = gravityDir === 1 ? 'floor' : 'ceiling';
+            opponent.vy = 0;
+          }
+        } else {
+          // Climb to (active floor ± jump-apex distance) — opp at exact apex height.
+          const targetY = gravityDir === 1 ? GROUND_Y - 120 : CEIL_Y + 120;
+          const climbDir = gravityDir === 1 ? -1 : 1;
+          const reached = climbDir === -1 ? opponent.y <= targetY : opponent.y >= targetY;
+          if (!reached) {
+            opponent.y += (opponent.vy || climbDir * EVASION_SPEED) * dt;
+          } else {
+            opponent.y = targetY;
+            opponent.vy = 0;
+          }
         }
       }
     }
@@ -588,6 +613,26 @@
     // dt-correct shake decay.
     shake *= Math.pow(0.85, dt * 60);
 
+    // Background motes drift; gravityDir inverts horizontal.
+    for (const m of MOTES) {
+      m.x += m.vx * dt * gravityDir;
+      m.y += m.vy * dt;
+      if (m.x < 0) m.x += W; else if (m.x > W) m.x -= W;
+      if (m.y < 0) m.y += H; else if (m.y > H) m.y -= H;
+    }
+
+    // Palette wash lerps toward gravity-driven target.
+    {
+      const t = gravityDir === 1 ? PALETTE_RIGHT_UP : PALETTE_FLIPPED;
+      const k = 1 - Math.pow(1 - 0.04, dt * 60);
+      bgR += (t[0] - bgR) * k;
+      bgG += (t[1] - bgG) * k;
+      bgB += (t[2] - bgB) * k;
+    }
+
+    // Pulse ring tick.
+    if (pulseRing.t < pulseRing.dur) pulseRing.t += dt;
+
     keysPressed.clear();
   }
 
@@ -646,6 +691,17 @@
     ctx.translate(Math.round(x), Math.round(y));
     ctx.rotate(angle);
     drawStick(0, 0, opts);
+    if (opts && opts.shielding) {
+      const r = opts.shieldRemaining;
+      const a = r < 0.25
+        ? 0.5 + 0.5 * (Math.floor(performance.now() / 40) % 2)
+        : 0.55 + 0.25 * Math.sin(performance.now() / 220);
+      ctx.fillStyle = `rgba(136, 204, 238, ${a.toFixed(3)})`;
+      ctx.font = 'bold 18px ui-monospace, monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('(+)', 0, -78);
+    }
     ctx.restore();
   }
 
@@ -755,17 +811,37 @@
   }
 
   function render() {
-    ctx.clearRect(0, 0, W, H);
+    // Palette wash — drawn before save/translate so the bg is shake-immune.
+    ctx.fillStyle = `rgb(${Math.round(bgR)}, ${Math.round(bgG)}, ${Math.round(bgB)})`;
+    ctx.fillRect(0, 0, W, H);
 
     const sx = (Math.random() - 0.5) * shake;
     const sy = (Math.random() - 0.5) * shake;
     ctx.save();
     ctx.translate(sx, sy);
 
+    // Parallax motes — atmospheric layer behind walls/ground.
+    for (const m of MOTES) {
+      ctx.fillStyle = `rgba(180, 180, 200, ${m.alpha.toFixed(3)})`;
+      ctx.fillRect(Math.round(m.x), Math.round(m.y), 1, 1);
+    }
+
     drawWalls();
     drawGround();
 
-    if (flipTimer < 1 && roundPhase === 'fighting' && (state === STATE.PLAY || state === STATE.OVER)) {
+    // Shield-drop pulse ring — between ground and fighters.
+    if (pulseRing.t < pulseRing.dur) {
+      const tt = pulseRing.t / pulseRing.dur;
+      const radius = 30 + 200 * tt;
+      const alpha = (1 - tt) * 0.4;
+      ctx.strokeStyle = `rgba(136, 204, 238, ${alpha.toFixed(3)})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(pulseRing.x, pulseRing.y, radius, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    if (flipTimer < 1 && roundPhase === 'fighting' && state === STATE.PLAY) {
       const a = 0.5 + 0.5 * Math.sin(flipTimer * 20);
       ctx.save();
       ctx.fillStyle = `rgba(220, 180, 80, ${a.toFixed(3)})`;
@@ -807,24 +883,10 @@
         facing: -1,
         color: flashColor(OPPONENT_RGB, FLASH_RGB, opponent.hitFlash / HIT_FLASH_DURATION),
         renderAngle: opponent.renderAngle,
+        shielding: opponent.state === 'shielding',
+        shieldRemaining: opponent.stateTimer,
       });
 
-      if (opponent.state === 'shielding') {
-        const remaining = opponent.stateTimer;
-        let alpha;
-        if (remaining < 0.25) {
-          // Urgency flicker in last 0.25s before drop.
-          alpha = 0.5 + 0.5 * (Math.floor(performance.now() / 40) % 2);
-        } else {
-          // Slow breath while protected.
-          alpha = 0.55 + 0.25 * Math.sin(performance.now() / 220);
-        }
-        ctx.fillStyle = `rgba(136, 204, 238, ${alpha.toFixed(3)})`;
-        ctx.font = 'bold 18px ui-monospace, monospace';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('(+)', opponent.x, opponent.y - 78);
-      }
 
       drawHpBar('YOU', player.hp, player.maxHp, 'left',
                 player.displayedHp, player.damageTailHp);
@@ -836,10 +898,10 @@
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillText((playerWins >= 1 ? '*' : 'o') + ' ' + (playerWins >= 2 ? '*' : 'o'),
-                   WALL_THICKNESS + 12, 12);
+                   WALL_THICKNESS + 12, 42);
       ctx.textAlign = 'right';
       ctx.fillText((opponentWins >= 1 ? '*' : 'o') + ' ' + (opponentWins >= 2 ? '*' : 'o'),
-                   W - WALL_THICKNESS - 12, 12);
+                   W - WALL_THICKNESS - 12, 42);
 
       ctx.fillStyle = '#666';
       ctx.font = '12px monospace';
