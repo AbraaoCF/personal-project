@@ -42,11 +42,11 @@
     x: 250, y: GROUND_Y, vx: 0, vy: 0,
     onGround: true,
     facing: 1,
+    surface: 'floor',
     crouching: false,
     hp: 100, maxHp: 100,
     displayedHp: 100, damageTailHp: 100,
     hitFlash: 0,
-    contactCooldown: 0,
     punchTimer: 0,
     punchCooldown: 0,
     punchBuffer: 0,
@@ -62,7 +62,7 @@
   };
 
   const opponent = {
-    x: 640, y: GROUND_Y,
+    x: 640, y: GROUND_Y, vy: 0,
     hp: 100, maxHp: 100,
     displayedHp: 100, damageTailHp: 100,
     hitFlash: 0,
@@ -72,6 +72,8 @@
     patrolMax: 800,
     state: 'open',
     stateTimer: 0,
+    surface: 'floor',
+    fleeVx: 0,
   };
 
   const PUNCH_REACH = 38;             // px
@@ -83,9 +85,6 @@
   const JUMP_VELOCITY = -720;         // px/s
   const GRAVITY = 2160;               // px/s^2
   const OPPONENT_SPEED = 96;          // px/s
-  const CONTACT_DAMAGE = 4;
-  const CONTACT_COOLDOWN = 0.5;       // s
-  const CONTACT_RANGE = 10;           // px
   const PUNCH_BUFFER = 0.1;           // s
   const HITSTOP_DURATION = 0.0667;    // s
   const HIT_FLASH_DURATION = 0.1333;  // s
@@ -108,15 +107,27 @@
   const SHIELD_BOUNCE = 360;          // px/s — knockback when player hits the shield
   const EVASION_RANGE = 90;           // px — opponent flees when player closer than this
   const EVASION_SPEED = 130;          // px/s — opponent's flee speed
+  // Surface enum scaffold. Each fighter clings to one face of the arena.
+  // Iter-10 will add 'ceiling' and gravity flip. The table tells gravity
+  // which way "down" pulls relative to a fighter's surface.
+  const SURFACE_GRAVITY = {
+    floor: { gx: 0, gy: 1 },
+    left:  { gx: -1, gy: 0.4 },
+    right: { gx: 1, gy: 0.4 },
+  };
+  const WALL_SLIDE_VY = 120;          // px/s — terminal slide speed on a wall
+  const WALL_JUMP_VX = 360;           // px/s — horizontal kick off a wall
+  const WALL_STICK_VX_MIN = 80;       // px/s — minimum |vx| into wall to stick
 
   function resetRound() {
     player.x = 250; player.y = GROUND_Y;
     player.vx = 0; player.vy = 0;
     player.onGround = true; player.facing = 1;
+    player.surface = 'floor';
     player.crouching = false;
     player.hp = player.maxHp;
     player.displayedHp = player.maxHp; player.damageTailHp = player.maxHp;
-    player.hitFlash = 0; player.contactCooldown = 0;
+    player.hitFlash = 0;
     player.punchTimer = 0; player.punchCooldown = 0;
     player.punchBuffer = 0;
     player.uppercutTimer = 0;
@@ -131,11 +142,13 @@
     shake = 0;
     opponent.hp = opponent.maxHp;
     opponent.displayedHp = opponent.maxHp; opponent.damageTailHp = opponent.maxHp;
-    opponent.x = 640;
+    opponent.x = 640; opponent.y = GROUND_Y; opponent.vy = 0;
     opponent.hitFlash = 0; opponent.knockback = 0;
     opponent.patrolDir = -1;
     opponent.state = 'open';
     opponent.stateTimer = SHIELD_OPEN;
+    opponent.surface = 'floor';
+    opponent.fleeVx = 0;
   }
 
   function resetMatch() {
@@ -216,8 +229,10 @@
       player.knockbackVx = 0;
     }
     if (move !== 0) player.facing = move;
-    player.x = Math.max(ARENA_LEFT + 16, Math.min(ARENA_RIGHT - 16, player.x));
-    if (player.x === ARENA_LEFT + 16 || player.x === ARENA_RIGHT - 16) player.vx = 0;
+    if (player.surface === 'floor') {
+      player.x = Math.max(ARENA_LEFT + 16, Math.min(ARENA_RIGHT - 16, player.x));
+      if (player.x === ARENA_LEFT + 16 || player.x === ARENA_RIGHT - 16) player.vx = 0;
+    }
 
     player.crouching = player.onGround
       && player.whiffLock <= 0
@@ -226,13 +241,54 @@
     if (player.crouching) player.vx = 0;
 
     const wantJump = keysPressed.has('w') || keysPressed.has('arrowup');
-    if (wantJump && player.onGround && !player.crouching && player.whiffLock <= 0 && player.landingLag <= 0) {
-      player.vy = JUMP_VELOCITY;
-      player.onGround = false;
+    if (wantJump) {
+      if (player.surface === 'left') {
+        player.vy = JUMP_VELOCITY;
+        player.vx = WALL_JUMP_VX;
+        player.facing = 1;
+        player.surface = 'floor';
+        player.whiffLock = 0;
+      } else if (player.surface === 'right') {
+        player.vy = JUMP_VELOCITY;
+        player.vx = -WALL_JUMP_VX;
+        player.facing = -1;
+        player.surface = 'floor';
+        player.whiffLock = 0;
+      } else if (player.onGround && !player.crouching && player.whiffLock <= 0 && player.landingLag <= 0) {
+        player.vy = JUMP_VELOCITY;
+        player.onGround = false;
+      }
     }
-    if (!player.onGround) {
+
+    if (player.surface !== 'floor') {
+      // Wall-stuck: slow slide; gravity already pressing into wall.
+      player.vy = Math.min(player.vy + GRAVITY * 0.25 * dt, WALL_SLIDE_VY);
+      player.y += player.vy * dt;
+      if (player.y >= GROUND_Y) {
+        player.y = GROUND_Y;
+        player.vy = 0;
+        player.surface = 'floor';
+        player.onGround = true;
+        player.vx = 0;
+      }
+      if (player.y < 60) player.surface = 'floor';
+    } else if (!player.onGround) {
       player.vy += GRAVITY * dt;
       player.y += player.vy * dt;
+      // Auto-stick on wall contact while airborne and moving into wall fast enough.
+      if (player.vy >= 0 && Math.abs(player.vx) >= WALL_STICK_VX_MIN) {
+        if (player.x <= ARENA_LEFT + 16 && player.vx < 0) {
+          player.surface = 'left';
+          player.x = ARENA_LEFT + 16;
+          player.vx = 0;
+          player.vy = Math.min(player.vy, WALL_SLIDE_VY * 0.5);
+        } else if (player.x >= ARENA_RIGHT - 16 && player.vx > 0) {
+          player.surface = 'right';
+          player.x = ARENA_RIGHT - 16;
+          player.vx = 0;
+          player.vy = Math.min(player.vy, WALL_SLIDE_VY * 0.5);
+        }
+      }
       if (player.y >= GROUND_Y) {
         player.y = GROUND_Y;
         player.vy = 0;
@@ -240,7 +296,7 @@
         if (player.diving) {
           player.diving = false;
           player.vx = 0;
-          if (!player.diveHit) player.landingLag = LANDING_LAG;
+          player.landingLag = LANDING_LAG;
           player.diveHit = false;
         }
       }
@@ -294,22 +350,52 @@
     }
 
     if (!knockbackActive && opponent.hp > 0 && player.hp > 0) {
-      const dxToPlayer = player.x - opponent.x;
-      const dist = Math.abs(dxToPlayer);
-      if (dist < EVASION_RANGE) {
-        // Cat/mouse: flee from the player.
-        const fleeDir = dxToPlayer > 0 ? -1 : 1;
-        opponent.x += fleeDir * EVASION_SPEED * dt;
-        opponent.patrolDir = fleeDir;
+      if (opponent.surface === 'floor') {
+        const dxToPlayer = player.x - opponent.x;
+        const dist = Math.abs(dxToPlayer);
+        if (dist < EVASION_RANGE) {
+          // Cat/mouse: flee from the player with eased velocity.
+          const targetVx = (dxToPlayer > 0 ? -1 : 1) * EVASION_SPEED;
+          opponent.fleeVx += (targetVx - opponent.fleeVx) * (1 - Math.pow(1 - 0.18, dt * 60));
+          opponent.x += opponent.fleeVx * dt;
+          opponent.patrolDir = opponent.fleeVx < 0 ? -1 : 1;
+          // Cornered? Climb the wall.
+          if (opponent.x <= ARENA_LEFT + 16 + 4) {
+            opponent.surface = 'left';
+            opponent.x = ARENA_LEFT + 16;
+            opponent.vy = -EVASION_SPEED;
+          } else if (opponent.x >= ARENA_RIGHT - 16 - 4) {
+            opponent.surface = 'right';
+            opponent.x = ARENA_RIGHT - 16;
+            opponent.vy = -EVASION_SPEED;
+          }
+        } else {
+          opponent.fleeVx = 0;
+          opponent.x += opponent.patrolDir * OPPONENT_SPEED * dt;
+          if (opponent.x <= opponent.patrolMin) {
+            opponent.x = opponent.patrolMin;
+            opponent.patrolDir = 1;
+          } else if (opponent.x >= opponent.patrolMax) {
+            opponent.x = opponent.patrolMax;
+            opponent.patrolDir = -1;
+          }
+        }
       } else {
-        // Default patrol — wander between bounds.
-        opponent.x += opponent.patrolDir * OPPONENT_SPEED * dt;
-        if (opponent.x <= opponent.patrolMin) {
-          opponent.x = opponent.patrolMin;
-          opponent.patrolDir = 1;
-        } else if (opponent.x >= opponent.patrolMax) {
-          opponent.x = opponent.patrolMax;
-          opponent.patrolDir = -1;
+        // Wall-stuck: climb to mid-height, then hold.
+        const targetY = H * 0.45;
+        if (opponent.y > targetY) {
+          opponent.y += (opponent.vy || -EVASION_SPEED) * dt;
+        } else {
+          opponent.y = targetY;
+          opponent.vy = 0;
+        }
+        // If player isn't pressuring this wall and is far, drop back.
+        const playerNearWall = (opponent.surface === 'left' && player.x < 200)
+                            || (opponent.surface === 'right' && player.x > W - 200);
+        if (!playerNearWall && Math.abs(player.x - opponent.x) > EVASION_RANGE * 2) {
+          opponent.surface = 'floor';
+          opponent.y = GROUND_Y;
+          opponent.vy = 0;
         }
       }
     }
@@ -333,6 +419,9 @@
           } else {
             opponent.hp = Math.max(0, opponent.hp - UPPER_DAMAGE);
             opponent.hitFlash = HIT_FLASH_DURATION;
+            if (opponent.surface !== 'floor') {
+              opponent.surface = 'floor'; opponent.y = GROUND_Y; opponent.vy = 0;
+            }
             opponent.knockback = 480 * player.facing;
             opponent.state = 'shielding';
             opponent.stateTimer = SHIELD_CLOSED;
@@ -355,6 +444,9 @@
           } else {
             opponent.hp = Math.max(0, opponent.hp - PUNCH_DAMAGE);
             opponent.hitFlash = HIT_FLASH_DURATION;
+            if (opponent.surface !== 'floor') {
+              opponent.surface = 'floor'; opponent.y = GROUND_Y; opponent.vy = 0;
+            }
             opponent.knockback = 360 * player.facing;
             opponent.state = 'shielding';
             opponent.stateTimer = SHIELD_CLOSED;
@@ -383,6 +475,9 @@
         } else {
           opponent.hp = Math.max(0, opponent.hp - DIVE_DAMAGE);
           opponent.hitFlash = HIT_FLASH_DURATION;
+          if (opponent.surface !== 'floor') {
+            opponent.surface = 'floor'; opponent.y = GROUND_Y; opponent.vy = 0;
+          }
           opponent.knockback = 420 * player.facing;
           opponent.state = 'shielding';
           opponent.stateTimer = SHIELD_CLOSED;
@@ -393,16 +488,7 @@
       }
     }
 
-    if (player.contactCooldown > 0) player.contactCooldown -= dt;
     if (player.hitFlash > 0) player.hitFlash -= dt;
-    const contactDx = Math.abs(player.x - opponent.x);
-    if (contactDx < CONTACT_RANGE && player.contactCooldown <= 0 && opponent.hp > 0) {
-      player.hp = Math.max(0, player.hp - CONTACT_DAMAGE);
-      player.hitFlash = HIT_FLASH_DURATION;
-      player.contactCooldown = CONTACT_COOLDOWN;
-      player.knockbackVx = -360 * (opponent.x > player.x ? 1 : -1);
-      hitstop = player.hp <= 0 ? HITSTOP_DURATION * 2 : HITSTOP_DURATION;
-    }
 
     if (hitstop > 0) shake = Math.max(shake, (hitstop / HITSTOP_DURATION) * 4);
 
@@ -466,6 +552,15 @@
     ctx.textAlign = 'left';
     ctx.textBaseline = 'alphabetic';
     for (let x = ARENA_LEFT; x < ARENA_RIGHT; x += 16) ctx.fillText('-', x, GROUND_Y + 18);
+  }
+
+  function drawStickOnSurface(x, y, surface, opts) {
+    if (surface === 'floor') { drawStick(x, y, opts); return; }
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(surface === 'left' ? Math.PI / 2 : -Math.PI / 2);
+    drawStick(0, 0, opts);
+    ctx.restore();
   }
 
   function drawStick(x, y, opts = {}) {
@@ -556,7 +651,7 @@
     ctx.fillRect(x, y, w, h);
 
     const tailPct = Math.max(0, Math.min(1, damageTailHp / maxHp));
-    ctx.fillStyle = '#8a4a4a';
+    ctx.fillStyle = '#5a2a2a';
     if (side === 'left') ctx.fillRect(x + w - w * tailPct, y, w * tailPct, h);
     else ctx.fillRect(x, y, w * tailPct, h);
 
@@ -589,11 +684,11 @@
       const playerPunchT = player.punchTimer > 0
         ? 1 - player.punchTimer / PUNCH_DURATION
         : -1;
-      drawStick(player.x, player.y, {
+      drawStickOnSurface(player.x, player.y, player.surface, {
         facing: player.facing,
         punchT: playerPunchT,
         color: flashColor(PLAYER_RGB, FLASH_RGB, player.hitFlash / HIT_FLASH_DURATION),
-        airborne: !player.onGround,
+        airborne: !player.onGround && player.surface === 'floor',
         crouch: player.crouching,
         diving: player.diving,
         landingLag: player.landingLag,
@@ -611,13 +706,22 @@
         ctx.fillText('*', player.x + player.facing * 18, arcY);
       }
 
-      drawStick(opponent.x, opponent.y, {
+      drawStickOnSurface(opponent.x, opponent.y, opponent.surface, {
         facing: -1,
         color: flashColor(OPPONENT_RGB, FLASH_RGB, opponent.hitFlash / HIT_FLASH_DURATION),
       });
 
       if (opponent.state === 'shielding') {
-        ctx.fillStyle = '#88ccee';
+        const remaining = opponent.stateTimer;
+        let alpha;
+        if (remaining < 0.25) {
+          // Urgency flicker in last 0.25s before drop.
+          alpha = 0.5 + 0.5 * (Math.floor(performance.now() / 40) % 2);
+        } else {
+          // Slow breath while protected.
+          alpha = 0.55 + 0.25 * Math.sin(performance.now() / 220);
+        }
+        ctx.fillStyle = `rgba(136, 204, 238, ${alpha.toFixed(3)})`;
         ctx.font = 'bold 18px ui-monospace, monospace';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
