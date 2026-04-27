@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Stick Sparring</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div id="app">
+  <canvas id="game" width="900" height="500"></canvas>
+
+  <div id="hud" class="hud"></div>
+
+  <div id="menu" class="overlay">
+    <h1 class="title">STICK SPARRING</h1>
+    <p class="subtitle">a 1v1 ascii fight</p>
+    <button id="btn-start">Start Sparring</button>
+    <button id="btn-controls">Controls</button>
+  </div>
+
+  <div id="controls-screen" class="overlay hidden">
+    <h2 class="title small">CONTROLS</h2>
+    <div class="controls">
+      A / D &nbsp;or&nbsp; ← / → &nbsp;— walk<br/>
+      W &nbsp;or&nbsp; ↑ &nbsp;— jump<br/>
+      J &nbsp;or&nbsp; SPACE &nbsp;— punch<br/>
+      ESC &nbsp;— back to menu
+    </div>
+    <button id="btn-back">Back</button>
+  </div>
+
+  <div id="gameover" class="overlay hidden">
+    <h2 class="title medium">K.O.</h2>
+    <p class="subtitle" id="gameover-stats"></p>
+    <button id="btn-again">Spar Again</button>
+    <button id="btn-menu">Main Menu</button>
+  </div>
+</div>
+
+<script src="game.js"></script>
+</body>
+</html>
