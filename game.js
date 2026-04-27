@@ -18,6 +18,8 @@
   let hitstop = 0;
   let gameEndHold = 0;
   let shake = 0;
+  let gravityDir = 1;
+  let flipTimer = 0;  // initialised in resetRound; FLIP_COOLDOWN is below
 
   const ROUNDS_TO_WIN = 2;
   const INTERMISSION_DURATION = 1.5;
@@ -43,6 +45,7 @@
     onGround: true,
     facing: 1,
     surface: 'floor',
+    renderAngle: 0,
     crouching: false,
     hp: 100, maxHp: 100,
     displayedHp: 100, damageTailHp: 100,
@@ -73,6 +76,7 @@
     state: 'open',
     stateTimer: 0,
     surface: 'floor',
+    renderAngle: 0,
     fleeVx: 0,
   };
 
@@ -111,13 +115,16 @@
   // Iter-10 will add 'ceiling' and gravity flip. The table tells gravity
   // which way "down" pulls relative to a fighter's surface.
   const SURFACE_GRAVITY = {
-    floor: { gx: 0, gy: 1 },
-    left:  { gx: -1, gy: 0.4 },
-    right: { gx: 1, gy: 0.4 },
+    floor:   { gx: 0, gy: 1 },
+    left:    { gx: -1, gy: 0.4 },
+    right:   { gx: 1, gy: 0.4 },
+    ceiling: { gx: 0, gy: -1 },
   };
   const WALL_SLIDE_VY = 120;          // px/s — terminal slide speed on a wall
   const WALL_JUMP_VX = 360;           // px/s — horizontal kick off a wall
   const WALL_STICK_VX_MIN = 80;       // px/s — minimum |vx| into wall to stick
+  const FLIP_COOLDOWN = 8.0;          // s — how often gravity flips
+  const CEIL_Y = 60;                  // px — y of the ceiling face
 
   function resetRound() {
     player.x = 250; player.y = GROUND_Y;
@@ -140,6 +147,10 @@
     hitstop = 0;
     gameEndHold = 0;
     shake = 0;
+    gravityDir = 1;
+    flipTimer = FLIP_COOLDOWN;
+    player.renderAngle = 0;
+    opponent.renderAngle = 0;
     opponent.hp = opponent.maxHp;
     opponent.displayedHp = opponent.maxHp; opponent.damageTailHp = opponent.maxHp;
     opponent.x = 640; opponent.y = GROUND_Y; opponent.vy = 0;
@@ -212,29 +223,52 @@
       return;
     }
 
+    // Gravity flip: periodic timer; on flip, swap floor<->ceiling for grounded
+    // fighters, open both shields (Fall Guys window), pulse camera shake.
+    flipTimer -= dt;
+    if (flipTimer <= 0 && gameEndHold <= 0) {
+      gravityDir *= -1;
+      flipTimer = FLIP_COOLDOWN;
+      for (const f of [player, opponent]) {
+        if (f.surface === 'floor' && f.onGround) {
+          f.surface = 'ceiling'; f.y = CEIL_Y; f.vy = 0;
+        } else if (f.surface === 'ceiling' && f.onGround) {
+          f.surface = 'floor'; f.y = GROUND_Y; f.vy = 0;
+        }
+      }
+      opponent.state = 'open';
+      opponent.stateTimer = SHIELD_OPEN;
+      shake = Math.max(shake, 7);
+    }
+
     let move = 0;
     if (keys.has('a') || keys.has('arrowleft')) move -= 1;
     if (keys.has('d') || keys.has('arrowright')) move += 1;
     if (player.whiffLock > 0 || player.landingLag > 0 || player.diving) move = 0;
-    if (!player.diving) {
+    if (!player.diving && player.surface === 'floor') {
       const targetVx = move * WALK_SPEED;
       player.vx += (targetVx - player.vx) * (1 - Math.pow(1 - VX_LERP, dt * 60));
       if (Math.abs(player.vx) < 3) player.vx = 0;
     }
-    player.x += player.vx * dt;
+    if (player.surface === 'floor' || player.surface === 'ceiling') {
+      player.x += player.vx * dt;
+    }
     if (Math.abs(player.knockbackVx) > 6) {
-      player.x += player.knockbackVx * dt;
+      if (player.surface === 'floor' || player.surface === 'ceiling') {
+        player.x += player.knockbackVx * dt;
+      }
       player.knockbackVx *= Math.pow(0.7, dt * 60);
     } else {
       player.knockbackVx = 0;
     }
     if (move !== 0) player.facing = move;
-    if (player.surface === 'floor') {
+    if (player.surface === 'floor' || player.surface === 'ceiling') {
       player.x = Math.max(ARENA_LEFT + 16, Math.min(ARENA_RIGHT - 16, player.x));
       if (player.x === ARENA_LEFT + 16 || player.x === ARENA_RIGHT - 16) player.vx = 0;
     }
 
     player.crouching = player.onGround
+      && (player.surface === 'floor' || player.surface === 'ceiling')
       && player.whiffLock <= 0
       && player.landingLag <= 0
       && (keys.has('s') || keys.has('arrowdown') || player.uppercutTimer > 0);
@@ -243,55 +277,73 @@
     const wantJump = keysPressed.has('w') || keysPressed.has('arrowup');
     if (wantJump) {
       if (player.surface === 'left') {
-        player.vy = JUMP_VELOCITY;
+        player.vy = JUMP_VELOCITY * gravityDir;
         player.vx = WALL_JUMP_VX;
         player.facing = 1;
         player.surface = 'floor';
         player.whiffLock = 0;
+        player.onGround = false;
       } else if (player.surface === 'right') {
-        player.vy = JUMP_VELOCITY;
+        player.vy = JUMP_VELOCITY * gravityDir;
         player.vx = -WALL_JUMP_VX;
         player.facing = -1;
         player.surface = 'floor';
         player.whiffLock = 0;
+        player.onGround = false;
       } else if (player.onGround && !player.crouching && player.whiffLock <= 0 && player.landingLag <= 0) {
-        player.vy = JUMP_VELOCITY;
+        // Jump direction follows gravity: when flipped, jump upward = -y direction
+        // is replaced by +y direction (flying away from the new ceiling-floor).
+        player.vy = JUMP_VELOCITY * gravityDir;
         player.onGround = false;
       }
     }
 
-    if (player.surface !== 'floor') {
-      // Wall-stuck: slow slide; gravity already pressing into wall.
-      player.vy = Math.min(player.vy + GRAVITY * 0.25 * dt, WALL_SLIDE_VY);
+    const groundedY = gravityDir === 1 ? GROUND_Y : CEIL_Y;
+    const groundedSurface = gravityDir === 1 ? 'floor' : 'ceiling';
+    const onSurface = (y) => gravityDir === 1 ? y >= GROUND_Y : y <= CEIL_Y;
+
+    if (player.surface === 'left' || player.surface === 'right') {
+      // Wall-stuck: slow slide; gravity component along wall.
+      player.vy += GRAVITY * 0.25 * gravityDir * dt;
+      player.vy = Math.max(-WALL_SLIDE_VY, Math.min(WALL_SLIDE_VY, player.vy));
       player.y += player.vy * dt;
-      if (player.y >= GROUND_Y) {
-        player.y = GROUND_Y;
-        player.vy = 0;
-        player.surface = 'floor';
-        player.onGround = true;
-        player.vx = 0;
+      if (player.y >= GROUND_Y && gravityDir === 1) {
+        player.y = GROUND_Y; player.vy = 0;
+        player.surface = 'floor'; player.onGround = true; player.vx = 0;
+        if (player.diving) {
+          player.diving = false; player.landingLag = LANDING_LAG; player.diveHit = false;
+        }
+      } else if (player.y <= CEIL_Y && gravityDir === -1) {
+        player.y = CEIL_Y; player.vy = 0;
+        player.surface = 'ceiling'; player.onGround = true; player.vx = 0;
+        if (player.diving) {
+          player.diving = false; player.landingLag = LANDING_LAG; player.diveHit = false;
+        }
       }
-      if (player.y < 60) player.surface = 'floor';
+      // Detach off the "top" of the wall (in gravity-relative terms): slide off the inactive face.
+      if (gravityDir === 1 && player.y < CEIL_Y) player.surface = 'floor';
+      if (gravityDir === -1 && player.y > GROUND_Y) player.surface = 'floor';
     } else if (!player.onGround) {
-      player.vy += GRAVITY * dt;
+      player.vy += GRAVITY * gravityDir * dt;
       player.y += player.vy * dt;
       // Auto-stick on wall contact while airborne and moving into wall fast enough.
-      if (player.vy >= 0 && Math.abs(player.vx) >= WALL_STICK_VX_MIN) {
+      if (player.vy * gravityDir >= 0 && Math.abs(player.vx) >= WALL_STICK_VX_MIN) {
         if (player.x <= ARENA_LEFT + 16 && player.vx < 0) {
           player.surface = 'left';
           player.x = ARENA_LEFT + 16;
           player.vx = 0;
-          player.vy = Math.min(player.vy, WALL_SLIDE_VY * 0.5);
+          player.vy = Math.max(-WALL_SLIDE_VY * 0.5, Math.min(WALL_SLIDE_VY * 0.5, player.vy));
         } else if (player.x >= ARENA_RIGHT - 16 && player.vx > 0) {
           player.surface = 'right';
           player.x = ARENA_RIGHT - 16;
           player.vx = 0;
-          player.vy = Math.min(player.vy, WALL_SLIDE_VY * 0.5);
+          player.vy = Math.max(-WALL_SLIDE_VY * 0.5, Math.min(WALL_SLIDE_VY * 0.5, player.vy));
         }
       }
-      if (player.y >= GROUND_Y) {
-        player.y = GROUND_Y;
+      if (onSurface(player.y)) {
+        player.y = groundedY;
         player.vy = 0;
+        player.surface = groundedSurface;
         player.onGround = true;
         if (player.diving) {
           player.diving = false;
@@ -311,13 +363,13 @@
     if (player.whiffLock > 0) player.whiffLock -= dt;
     if (player.landingLag > 0) player.landingLag -= dt;
 
-    // Divepunch: descending air J press, bypasses buffer
+    // Divepunch: descending-toward-active-floor air J press, bypasses buffer.
     if ((keysPressed.has('j') || keysPressed.has(' '))
-        && !player.onGround && player.vy >= 0
+        && !player.onGround && player.vy * gravityDir >= 0
         && !player.diving && player.whiffLock <= 0) {
       player.diving = true;
       player.diveHit = false;
-      player.vy = DIVE_VY_BOOST;
+      player.vy = DIVE_VY_BOOST * gravityDir;
       player.vx = DIVE_VX * player.facing;
       player.punchAttempts++;
       keysPressed.delete('j');
@@ -350,7 +402,7 @@
     }
 
     if (!knockbackActive && opponent.hp > 0 && player.hp > 0) {
-      if (opponent.surface === 'floor') {
+      if (opponent.surface === 'floor' || opponent.surface === 'ceiling') {
         const dxToPlayer = player.x - opponent.x;
         const dist = Math.abs(dxToPlayer);
         if (dist < EVASION_RANGE) {
@@ -359,15 +411,15 @@
           opponent.fleeVx += (targetVx - opponent.fleeVx) * (1 - Math.pow(1 - 0.18, dt * 60));
           opponent.x += opponent.fleeVx * dt;
           opponent.patrolDir = opponent.fleeVx < 0 ? -1 : 1;
-          // Cornered? Climb the wall.
+          // Cornered? Climb the wall (away from current floor/ceiling).
           if (opponent.x <= ARENA_LEFT + 16 + 4) {
             opponent.surface = 'left';
             opponent.x = ARENA_LEFT + 16;
-            opponent.vy = -EVASION_SPEED;
+            opponent.vy = -EVASION_SPEED * gravityDir;
           } else if (opponent.x >= ARENA_RIGHT - 16 - 4) {
             opponent.surface = 'right';
             opponent.x = ARENA_RIGHT - 16;
-            opponent.vy = -EVASION_SPEED;
+            opponent.vy = -EVASION_SPEED * gravityDir;
           }
         } else {
           opponent.fleeVx = 0;
@@ -381,20 +433,24 @@
           }
         }
       } else {
-        // Wall-stuck: climb to mid-height, then hold.
-        const targetY = H * 0.45;
-        if (opponent.y > targetY) {
-          opponent.y += (opponent.vy || -EVASION_SPEED) * dt;
+        // Wall-stuck: climb to mid-height (offset from current floor), then hold.
+        // When gravity normal (gravityDir=1) climb up to H*0.6 (300px from top).
+        // When flipped (gravityDir=-1) climb down to H*0.4 from current ceiling.
+        const targetY = gravityDir === 1 ? H * 0.6 : H * 0.4;
+        const climbDir = gravityDir === 1 ? -1 : 1;  // sign of vy needed
+        const reached = climbDir === -1 ? opponent.y <= targetY : opponent.y >= targetY;
+        if (!reached) {
+          opponent.y += (opponent.vy || climbDir * EVASION_SPEED) * dt;
         } else {
           opponent.y = targetY;
           opponent.vy = 0;
         }
-        // If player isn't pressuring this wall and is far, drop back.
+        // If player isn't pressuring this wall and is far, drop back to active floor.
         const playerNearWall = (opponent.surface === 'left' && player.x < 200)
                             || (opponent.surface === 'right' && player.x > W - 200);
         if (!playerNearWall && Math.abs(player.x - opponent.x) > EVASION_RANGE * 2) {
-          opponent.surface = 'floor';
-          opponent.y = GROUND_Y;
+          opponent.surface = gravityDir === 1 ? 'floor' : 'ceiling';
+          opponent.y = gravityDir === 1 ? GROUND_Y : CEIL_Y;
           opponent.vy = 0;
         }
       }
@@ -419,8 +475,10 @@
           } else {
             opponent.hp = Math.max(0, opponent.hp - UPPER_DAMAGE);
             opponent.hitFlash = HIT_FLASH_DURATION;
-            if (opponent.surface !== 'floor') {
-              opponent.surface = 'floor'; opponent.y = GROUND_Y; opponent.vy = 0;
+            if (opponent.surface === 'left' || opponent.surface === 'right') {
+              opponent.surface = gravityDir === 1 ? 'floor' : 'ceiling';
+              opponent.y = gravityDir === 1 ? GROUND_Y : CEIL_Y;
+              opponent.vy = 0;
             }
             opponent.knockback = 480 * player.facing;
             opponent.state = 'shielding';
@@ -444,8 +502,10 @@
           } else {
             opponent.hp = Math.max(0, opponent.hp - PUNCH_DAMAGE);
             opponent.hitFlash = HIT_FLASH_DURATION;
-            if (opponent.surface !== 'floor') {
-              opponent.surface = 'floor'; opponent.y = GROUND_Y; opponent.vy = 0;
+            if (opponent.surface === 'left' || opponent.surface === 'right') {
+              opponent.surface = gravityDir === 1 ? 'floor' : 'ceiling';
+              opponent.y = gravityDir === 1 ? GROUND_Y : CEIL_Y;
+              opponent.vy = 0;
             }
             opponent.knockback = 360 * player.facing;
             opponent.state = 'shielding';
@@ -475,8 +535,10 @@
         } else {
           opponent.hp = Math.max(0, opponent.hp - DIVE_DAMAGE);
           opponent.hitFlash = HIT_FLASH_DURATION;
-          if (opponent.surface !== 'floor') {
-            opponent.surface = 'floor'; opponent.y = GROUND_Y; opponent.vy = 0;
+          if (opponent.surface === 'left' || opponent.surface === 'right') {
+            opponent.surface = gravityDir === 1 ? 'floor' : 'ceiling';
+            opponent.y = gravityDir === 1 ? GROUND_Y : CEIL_Y;
+            opponent.vy = 0;
           }
           opponent.knockback = 420 * player.facing;
           opponent.state = 'shielding';
@@ -515,6 +577,17 @@
       }
     }
 
+    // Render-angle ease toward each fighter's surface target (shortest arc).
+    for (const f of [player, opponent]) {
+      let delta = surfaceAngle(f.surface) - f.renderAngle;
+      while (delta > Math.PI) delta -= 2 * Math.PI;
+      while (delta < -Math.PI) delta += 2 * Math.PI;
+      f.renderAngle += delta * (1 - Math.pow(1 - 0.4, dt * 60));
+    }
+
+    // dt-correct shake decay.
+    shake *= Math.pow(0.85, dt * 60);
+
     keysPressed.clear();
   }
 
@@ -541,24 +614,37 @@
   }
 
   function drawGround() {
+    const flipPulse = flipTimer < 1 ? (0.5 + 0.5 * Math.sin(flipTimer * 30)) : 0;
     ctx.strokeStyle = '#444';
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(ARENA_LEFT, GROUND_Y + 4);
     ctx.lineTo(ARENA_RIGHT, GROUND_Y + 4);
+    ctx.moveTo(ARENA_LEFT, CEIL_Y - 4);
+    ctx.lineTo(ARENA_RIGHT, CEIL_Y - 4);
     ctx.stroke();
-    ctx.fillStyle = '#333';
     ctx.font = '14px monospace';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'alphabetic';
+    const inactiveAlpha = 0.35 + 0.5 * flipPulse;
+    ctx.fillStyle = gravityDir === 1 ? 'rgba(80, 80, 80, 1)' : `rgba(80, 80, 80, ${inactiveAlpha.toFixed(3)})`;
     for (let x = ARENA_LEFT; x < ARENA_RIGHT; x += 16) ctx.fillText('-', x, GROUND_Y + 18);
+    ctx.fillStyle = gravityDir === -1 ? 'rgba(80, 80, 80, 1)' : `rgba(80, 80, 80, ${inactiveAlpha.toFixed(3)})`;
+    for (let x = ARENA_LEFT; x < ARENA_RIGHT; x += 16) ctx.fillText('-', x, CEIL_Y - 6);
+  }
+
+  function surfaceAngle(s) {
+    if (s === 'left') return Math.PI / 2;
+    if (s === 'right') return -Math.PI / 2;
+    if (s === 'ceiling') return Math.PI;
+    return 0;
   }
 
   function drawStickOnSurface(x, y, surface, opts) {
-    if (surface === 'floor') { drawStick(x, y, opts); return; }
+    const angle = (opts && opts.renderAngle != null) ? opts.renderAngle : surfaceAngle(surface);
     ctx.save();
-    ctx.translate(x, y);
-    ctx.rotate(surface === 'left' ? Math.PI / 2 : -Math.PI / 2);
+    ctx.translate(Math.round(x), Math.round(y));
+    ctx.rotate(angle);
     drawStick(0, 0, opts);
     ctx.restore();
   }
@@ -671,7 +757,6 @@
   function render() {
     ctx.clearRect(0, 0, W, H);
 
-    shake *= 0.85;
     const sx = (Math.random() - 0.5) * shake;
     const sy = (Math.random() - 0.5) * shake;
     ctx.save();
@@ -679,6 +764,17 @@
 
     drawWalls();
     drawGround();
+
+    if (flipTimer < 1 && roundPhase === 'fighting' && (state === STATE.PLAY || state === STATE.OVER)) {
+      const a = 0.5 + 0.5 * Math.sin(flipTimer * 20);
+      ctx.save();
+      ctx.fillStyle = `rgba(220, 180, 80, ${a.toFixed(3)})`;
+      ctx.font = 'bold 36px ui-monospace, monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillText(String(Math.ceil(flipTimer)), W / 2, 48);
+      ctx.restore();
+    }
 
     if (state === STATE.PLAY || state === STATE.OVER) {
       const playerPunchT = player.punchTimer > 0
@@ -688,12 +784,13 @@
         facing: player.facing,
         punchT: playerPunchT,
         color: flashColor(PLAYER_RGB, FLASH_RGB, player.hitFlash / HIT_FLASH_DURATION),
-        airborne: !player.onGround && player.surface === 'floor',
+        airborne: !player.onGround,
         crouch: player.crouching,
         diving: player.diving,
         landingLag: player.landingLag,
         walkPhase: player.walkPhase,
         whiffLock: player.whiffLock,
+        renderAngle: player.renderAngle,
       });
 
       if (player.uppercutTimer > 0) {
@@ -709,6 +806,7 @@
       drawStickOnSurface(opponent.x, opponent.y, opponent.surface, {
         facing: -1,
         color: flashColor(OPPONENT_RGB, FLASH_RGB, opponent.hitFlash / HIT_FLASH_DURATION),
+        renderAngle: opponent.renderAngle,
       });
 
       if (opponent.state === 'shielding') {
