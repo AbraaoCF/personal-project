@@ -16,6 +16,16 @@
   const STATE = { MENU: 'menu', PLAY: 'play', OVER: 'over' };
   let state = STATE.MENU;
   let hitstop = 0;
+  let gameEndHold = 0;
+  let shake = 0;
+
+  const ROUNDS_TO_WIN = 2;
+  const INTERMISSION_DURATION = 1.5;
+  let playerWins = 0;
+  let opponentWins = 0;
+  let roundNumber = 1;
+  let roundPhase = 'fighting';
+  let intermissionTimer = 0;
 
   const keys = new Set();
   const keysPressed = new Set();
@@ -107,7 +117,7 @@
   const FEINT_TRIGGER_RATIO = 0.6;
   const FEINT_DURATION = 0.4;         // s
 
-  function resetMatch() {
+  function resetRound() {
     player.x = 250; player.y = GROUND_Y;
     player.vx = 0; player.vy = 0;
     player.onGround = true; player.facing = 1;
@@ -124,8 +134,9 @@
     player.landingLag = 0;
     player.diveHit = false;
     player.walkPhase = 0;
-    player.punchesLanded = 0; player.punchAttempts = 0;
     hitstop = 0;
+    gameEndHold = 0;
+    shake = 0;
     opponent.hp = opponent.maxHp;
     opponent.displayedHp = opponent.maxHp; opponent.damageTailHp = opponent.maxHp;
     opponent.x = 640;
@@ -135,6 +146,17 @@
     opponent.stateTimer = 0;
     opponent.jabHit = false;
     opponent.feintRoll = false;
+  }
+
+  function resetMatch() {
+    resetRound();
+    player.punchesLanded = 0;
+    player.punchAttempts = 0;
+    playerWins = 0;
+    opponentWins = 0;
+    roundNumber = 1;
+    roundPhase = 'fighting';
+    intermissionTimer = 0;
   }
 
   function show(el) { el.classList.remove('hidden'); }
@@ -152,10 +174,12 @@
   }
   function toGameOver() {
     state = STATE.OVER;
-    const result = opponent.hp <= 0 ? 'VICTORY' : 'DEFEAT';
+    const result = playerWins > opponentWins ? 'VICTORY' : 'DEFEAT';
     document.getElementById('gameover-stats').textContent =
-      `${result}  -  Punches thrown: ${player.punchAttempts}  (landed: ${player.punchesLanded})`;
+      `${result} ${playerWins}-${opponentWins}  -  Punches thrown: ${player.punchAttempts}  (landed: ${player.punchesLanded})`;
+    gameOverScreen.classList.add('fading-in');
     show(gameOverScreen);
+    requestAnimationFrame(() => gameOverScreen.classList.remove('fading-in'));
   }
 
   document.getElementById('btn-start').onclick = startGame;
@@ -166,6 +190,16 @@
 
   function update(dt) {
     if (state !== STATE.PLAY) {
+      keysPressed.clear();
+      return;
+    }
+
+    if (roundPhase === 'intermission') {
+      intermissionTimer -= dt;
+      if (intermissionTimer <= 0) {
+        resetRound();
+        roundPhase = 'fighting';
+      }
       keysPressed.clear();
       return;
     }
@@ -197,6 +231,7 @@
 
     player.crouching = player.onGround
       && player.whiffLock <= 0
+      && player.landingLag <= 0
       && (keys.has('s') || keys.has('arrowdown') || player.uppercutTimer > 0);
     if (player.crouching) player.vx = 0;
 
@@ -408,6 +443,8 @@
       hitstop = player.hp <= 0 ? HITSTOP_DURATION * 2 : HITSTOP_DURATION;
     }
 
+    if (hitstop > 0) shake = Math.max(shake, (hitstop / HITSTOP_DURATION) * 4);
+
     const fastLerp = 1 - Math.pow(1 - 0.4, dt * 60);
     const slowLerp = 1 - Math.pow(1 - 0.06, dt * 60);
     player.displayedHp += (player.hp - player.displayedHp) * fastLerp;
@@ -415,8 +452,20 @@
     opponent.displayedHp += (opponent.hp - opponent.displayedHp) * fastLerp;
     opponent.damageTailHp += (opponent.displayedHp - opponent.damageTailHp) * slowLerp;
 
-    if ((player.hp <= 0 || opponent.hp <= 0) && hitstop <= 0) {
-      toGameOver();
+    if (roundPhase === 'fighting' && (player.hp <= 0 || opponent.hp <= 0) && hitstop <= 0) {
+      if (gameEndHold === 0) gameEndHold = 0.5;
+      gameEndHold -= dt;
+      if (gameEndHold <= 0) {
+        if (opponent.hp <= 0) playerWins++;
+        else opponentWins++;
+        if (playerWins >= ROUNDS_TO_WIN || opponentWins >= ROUNDS_TO_WIN) {
+          toGameOver();
+        } else {
+          roundPhase = 'intermission';
+          intermissionTimer = INTERMISSION_DURATION;
+          roundNumber++;
+        }
+      }
     }
 
     keysPressed.clear();
@@ -462,7 +511,7 @@
     const {
       facing = 1, punchT = -1, color = '#eee', airborne = false, crouch = false,
       windup = false, windupFacing = 1,
-      diving = false, landingLag = 0, walkPhase = 0,
+      diving = false, landingLag = 0, walkPhase = 0, whiffLock = 0,
     } = opts;
     ctx.fillStyle = color;
     ctx.font = 'bold 20px ui-monospace, monospace';
@@ -476,8 +525,9 @@
       return;
     }
     if (landingLag > 0) {
-      ctx.fillText('_O_', x, y - 30);
-      ctx.fillText('\\|/', x, y - 12);
+      const landLean = -facing * 4 * Math.min(1, (LANDING_LAG - landingLag) / 0.15);
+      ctx.fillText('_O_', x + landLean, y - 30);
+      ctx.fillText('\\|/', x + landLean * 0.5, y - 12);
       ctx.fillText('/ \\', x, y + 4);
       return;
     }
@@ -489,7 +539,11 @@
       return;
     }
 
-    ctx.fillText('O', x, y - 50);
+    const whiffLean = whiffLock > 0
+      ? facing * 4 * Math.min(1, (WHIFF_LOCK - whiffLock) / 0.15)
+      : 0;
+
+    ctx.fillText('O', x + whiffLean, y - 50);
 
     if (punchT >= 0) {
       let off;
@@ -507,14 +561,14 @@
 
       if (off > 0) {
         ctx.textAlign = facing === 1 ? 'left' : 'right';
-        ctx.fillText('====', x + facing * (8 + off), y - 50);
+        ctx.fillText('====', x + whiffLean + facing * (8 + off), y - 50);
         ctx.textAlign = 'center';
-        ctx.fillText(facing === 1 ? '|\\' : '/|', x, y - 30);
+        ctx.fillText(facing === 1 ? '|\\' : '/|', x + whiffLean, y - 30);
       } else {
-        ctx.fillText(windup ? (windupFacing === 1 ? '<|\\' : '/|>') : '/|\\', x, y - 30);
+        ctx.fillText(windup ? (windupFacing === 1 ? '<|\\' : '/|>') : '/|\\', x + whiffLean, y - 30);
       }
     } else {
-      ctx.fillText(windup ? (windupFacing === 1 ? '<|\\' : '/|>') : '/|\\', x, y - 30);
+      ctx.fillText(windup ? (windupFacing === 1 ? '<|\\' : '/|>') : '/|\\', x + whiffLean, y - 30);
     }
 
     const stride = (walkPhase % 64) < 32 ? '/ \\' : '\\ /';
@@ -561,6 +615,13 @@
 
   function render() {
     ctx.clearRect(0, 0, W, H);
+
+    shake *= 0.85;
+    const sx = (Math.random() - 0.5) * shake;
+    const sy = (Math.random() - 0.5) * shake;
+    ctx.save();
+    ctx.translate(sx, sy);
+
     drawWalls();
     drawGround();
 
@@ -577,6 +638,7 @@
         diving: player.diving,
         landingLag: player.landingLag,
         walkPhase: player.walkPhase,
+        whiffLock: player.whiffLock,
       });
 
       if (player.uppercutTimer > 0) {
@@ -636,11 +698,36 @@
       drawHpBar('OPPONENT', opponent.hp, opponent.maxHp, 'right',
                 opponent.displayedHp, opponent.damageTailHp);
 
+      ctx.fillStyle = '#ccc';
+      ctx.font = '12px monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText((playerWins >= 1 ? '*' : 'o') + ' ' + (playerWins >= 2 ? '*' : 'o'),
+                   WALL_THICKNESS + 12, 12);
+      ctx.textAlign = 'right';
+      ctx.fillText((opponentWins >= 1 ? '*' : 'o') + ' ' + (opponentWins >= 2 ? '*' : 'o'),
+                   W - WALL_THICKNESS - 12, 12);
+
       ctx.fillStyle = '#666';
       ctx.font = '12px monospace';
       ctx.textAlign = 'left';
+      ctx.textBaseline = 'alphabetic';
       ctx.fillText('A/D walk   W/↑ jump   S/↓ crouch   J / SPACE punch   ESC menu', WALL_THICKNESS + 8, H - 16);
+
+      if (roundPhase === 'intermission') {
+        ctx.fillStyle = 'rgba(10, 10, 10, 0.7)';
+        ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = '#eee';
+        ctx.font = 'bold 32px ui-monospace, monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(`ROUND ${roundNumber}`, W / 2, H / 2 - 20);
+        ctx.font = 'bold 20px ui-monospace, monospace';
+        ctx.fillText(`${playerWins} : ${opponentWins}`, W / 2, H / 2 + 16);
+      }
     }
+
+    ctx.restore();
   }
 
   let prev = performance.now();

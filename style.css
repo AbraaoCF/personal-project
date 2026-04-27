@@ -36,6 +36,9 @@ canvas {
 
 .overlay.hidden { display: none; }
 
+.overlay { transition: opacity 0.4s ease-out; opacity: 1; }
+.overlay.fading-in { opacity: 0; }
+
 .title {
   font-size: 44px;
   letter-spacing: 6px;
