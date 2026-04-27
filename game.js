@@ -31,6 +31,9 @@
     x: 250, y: GROUND_Y, vx: 0, vy: 0,
     onGround: true,
     facing: 1,
+    hp: 100, maxHp: 100,
+    hitFlash: 0,
+    contactCooldown: 0,
     punchTimer: 0,
     punchCooldown: 0,
     punchesLanded: 0,
@@ -47,19 +50,24 @@
     patrolMax: 800,
   };
 
-  const PUNCH_REACH = 70;
+  const PUNCH_REACH = 38;
   const PUNCH_DURATION = 12;
   const PUNCH_COOLDOWN_FRAMES = 18;
   const PUNCH_DAMAGE = 8;
   const WALK_SPEED = 3.2;
+  const VX_LERP = 0.25;
   const JUMP_VELOCITY = -12;
   const GRAVITY = 0.6;
   const OPPONENT_SPEED = 1.6;
+  const CONTACT_DAMAGE = 4;
+  const CONTACT_COOLDOWN_FRAMES = 30;
 
   function resetMatch() {
     player.x = 250; player.y = GROUND_Y;
     player.vx = 0; player.vy = 0;
     player.onGround = true; player.facing = 1;
+    player.hp = player.maxHp;
+    player.hitFlash = 0; player.contactCooldown = 0;
     player.punchTimer = 0; player.punchCooldown = 0;
     player.punchesLanded = 0; player.punchAttempts = 0;
     opponent.hp = opponent.maxHp;
@@ -83,8 +91,9 @@
   }
   function toGameOver() {
     state = STATE.OVER;
+    const result = opponent.hp <= 0 ? 'VICTORY' : 'DEFEAT';
     document.getElementById('gameover-stats').textContent =
-      `Punches thrown: ${player.punchAttempts}  (landed: ${player.punchesLanded})`;
+      `${result}  -  Punches thrown: ${player.punchAttempts}  (landed: ${player.punchesLanded})`;
     show(gameOverScreen);
   }
 
@@ -103,10 +112,13 @@
     let move = 0;
     if (keys.has('a') || keys.has('arrowleft')) move -= 1;
     if (keys.has('d') || keys.has('arrowright')) move += 1;
-    player.vx = move * WALK_SPEED;
+    const targetVx = move * WALK_SPEED;
+    player.vx += (targetVx - player.vx) * VX_LERP;
+    if (Math.abs(player.vx) < 0.05) player.vx = 0;
     player.x += player.vx;
     if (move !== 0) player.facing = move;
     player.x = Math.max(ARENA_LEFT + 16, Math.min(ARENA_RIGHT - 16, player.x));
+    if (player.x === ARENA_LEFT + 16 || player.x === ARENA_RIGHT - 16) player.vx = 0;
 
     const wantJump = keysPressed.has('w') || keysPressed.has('arrowup');
     if (wantJump && player.onGround) {
@@ -126,7 +138,7 @@
     if (player.punchCooldown > 0) player.punchCooldown--;
     if (player.punchTimer > 0) player.punchTimer--;
 
-    const wantPunch = keys.has('j') || keys.has(' ');
+    const wantPunch = keysPressed.has('j') || keysPressed.has(' ');
     if (wantPunch && player.punchCooldown === 0) {
       player.punchTimer = PUNCH_DURATION;
       player.punchCooldown = PUNCH_COOLDOWN_FRAMES;
@@ -134,7 +146,7 @@
 
       const fistX = player.x + player.facing * PUNCH_REACH;
       const fistY = player.y - 50;
-      if (Math.abs(fistX - opponent.x) < 40 && fistY > opponent.y - 65 && fistY < opponent.y - 5) {
+      if (Math.abs(fistX - opponent.x) < 28 && fistY > opponent.y - 65 && fistY < opponent.y - 5) {
         opponent.hp = Math.max(0, opponent.hp - PUNCH_DAMAGE);
         opponent.hitFlash = 8;
         opponent.knockback = 6 * player.facing;
@@ -160,6 +172,17 @@
     }
     opponent.x = Math.max(ARENA_LEFT + 16, Math.min(ARENA_RIGHT - 16, opponent.x));
 
+    if (player.contactCooldown > 0) player.contactCooldown--;
+    if (player.hitFlash > 0) player.hitFlash--;
+    const contactDx = Math.abs(player.x - opponent.x);
+    if (contactDx < 22 && player.contactCooldown === 0 && opponent.hp > 0) {
+      player.hp = Math.max(0, player.hp - CONTACT_DAMAGE);
+      player.hitFlash = 8;
+      player.contactCooldown = CONTACT_COOLDOWN_FRAMES;
+      player.vx = -6 * (opponent.x > player.x ? 1 : -1);
+    }
+
+    if (player.hp <= 0) toGameOver();
     if (opponent.hp <= 0) toGameOver();
 
     keysPressed.clear();
@@ -223,20 +246,26 @@
     if (airborne) ctx.fillText('~ ~', x, y + 6);
   }
 
-  function drawHpBar() {
-    const w = 240, h = 14;
-    const x = W - WALL_THICKNESS - w - 12, y = 20;
+  function drawHpBar(label, hp, maxHp, side) {
+    const w = 240, h = 14, y = 20;
+    const x = side === 'left'
+      ? WALL_THICKNESS + 12
+      : W - WALL_THICKNESS - w - 12;
     ctx.fillStyle = '#333';
     ctx.fillRect(x, y, w, h);
-    const pct = opponent.hp / opponent.maxHp;
+    const pct = hp / maxHp;
     ctx.fillStyle = pct > 0.5 ? '#6cdc6c' : pct > 0.25 ? '#dccc6c' : '#dc6c6c';
-    ctx.fillRect(x, y, w * pct, h);
+    if (side === 'left') {
+      ctx.fillRect(x + w - w * pct, y, w * pct, h);
+    } else {
+      ctx.fillRect(x, y, w * pct, h);
+    }
     ctx.strokeStyle = '#666';
     ctx.strokeRect(x, y, w, h);
     ctx.fillStyle = '#ccc';
     ctx.font = '12px monospace';
     ctx.textAlign = 'left';
-    ctx.fillText(`OPPONENT  ${opponent.hp}/${opponent.maxHp}`, x, y - 4);
+    ctx.fillText(`${label}  ${hp}/${maxHp}`, x, y - 4);
   }
 
   function render() {
@@ -248,14 +277,15 @@
       drawStick(player.x, player.y, {
         facing: player.facing,
         punching: player.punchTimer > 0,
-        color: '#9ad9ff',
+        color: player.hitFlash > 0 ? '#ff8888' : '#9ad9ff',
         airborne: !player.onGround,
       });
 
       const oppColor = opponent.hitFlash > 0 ? '#ff8888' : '#eeeeee';
       drawStick(opponent.x, opponent.y, { facing: -1, color: oppColor });
 
-      drawHpBar();
+      drawHpBar('YOU', player.hp, player.maxHp, 'left');
+      drawHpBar('OPPONENT', opponent.hp, opponent.maxHp, 'right');
 
       ctx.fillStyle = '#666';
       ctx.font = '12px monospace';
