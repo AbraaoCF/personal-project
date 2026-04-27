@@ -1,9 +1,9 @@
-# fly.toml app configuration file generated for app-twilight-feather-2279 on 2026-04-27T21:02:57Z
+# fly.toml app configuration file generated for personal-project-3toata on 2026-04-27T21:09:31Z
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
-app = 'app-twilight-feather-2279'
+app = 'personal-project-3toata'
 primary_region = 'iad'
 
 [build]
